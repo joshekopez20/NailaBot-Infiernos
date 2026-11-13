@@ -9,6 +9,17 @@ global.confirmCode = "";
 global.authFile = `MysticSession`;
 global.whatsappGroupUrl = '';
 
+// Configura Telegram desde el editor de archivos del hosting, sin terminal.
+// Rellena apiId, apiHash y phone, guarda y reinicia el bot. Cuando Telegram
+// mande el codigo, escribe code y guarda este archivo otra vez.
+global.telegramConfig = {
+  apiId: 0,
+  apiHash: '',
+  phone: '', // Ejemplo: +50212345678
+  code: '',
+  password: '' // Solo si tu cuenta tiene verificacion en dos pasos.
+};
+
 global.isBaileysFail = false;
 global.defaultLenguaje = 'es';
 

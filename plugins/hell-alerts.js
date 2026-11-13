@@ -127,6 +127,24 @@ function getListenerState() {
   return global.__hellAlertsTelegram;
 }
 
+async function waitForTelegramField(field) {
+  console.log(`[hell-alerts] Esperando ${field} en config.js; guarda el archivo desde el editor del hosting.`);
+  while (true) {
+    const value = String(global.telegramConfig?.[field] || '').trim();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+function getInlineTelegramConfig() {
+  const settings = global.telegramConfig || {};
+  const apiId = Number(settings.apiId);
+  const apiHash = String(settings.apiHash || '').trim();
+  const phone = String(settings.phone || '').trim();
+  if (!Number.isSafeInteger(apiId) || apiId <= 0 || !/^[\da-f]{32}$/i.test(apiHash) || !/^\+\d{7,15}$/.test(phone)) return null;
+  return { apiId, apiHash, phone };
+}
+
 function normalizeJid(conn) {
   const jid = conn?.user?.jid || conn?.user?.id;
   if (!jid) return '';
@@ -801,27 +819,47 @@ async function startTelegramListener() {
       delete state.previousState;
     }
 
-    if (!fs.existsSync(CONFIG_PATH)) {
+    const savedSession = fs.existsSync(CONFIG_PATH)
+      ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+      : null;
+    const inlineConfig = getInlineTelegramConfig();
+    if (!savedSession && !inlineConfig) {
       state.status = 'not-configured';
-      console.warn(`[hell-alerts] Falta ${CONFIG_PATH}. Ejecuta "npm run setup:telegram-hell" en una terminal local.`);
+      console.warn('[hell-alerts] Completa global.telegramConfig en config.js y reinicia el bot.');
       return;
     }
 
     try {
-      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-      if (!Number.isSafeInteger(config.apiId) || !config.apiHash || !config.session) {
-        throw new Error('El archivo de sesión no contiene API ID, API Hash y String Session válidos.');
+      const config = savedSession || inlineConfig;
+      if (!Number.isSafeInteger(config.apiId) || !config.apiHash || (savedSession && !config.session)) {
+        throw new Error('La configuracion de Telegram no contiene API ID, API Hash o sesion validos.');
       }
 
       state.status = 'connecting';
       const client = new TelegramClient(
-        new StringSession(config.session),
+        new StringSession(config.session || ''),
         config.apiId,
         config.apiHash,
         { connectionRetries: 5 }
       );
       state.client = client;
-      await client.connect();
+      if (!savedSession) {
+        await client.start({
+          phoneNumber: async () => inlineConfig.phone,
+          phoneCode: async () => waitForTelegramField('code'),
+          password: async () => waitForTelegramField('password'),
+          onError: error => console.error(`[hell-alerts] Telegram: ${error.message}`)
+        });
+        fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({
+          apiId: config.apiId,
+          apiHash: config.apiHash,
+          session: client.session.save()
+        }, null, 2), { mode: 0o600 });
+        console.log('[hell-alerts] Sesion de Telegram guardada. Borra code y password de config.js.');
+      } else {
+        await client.connect();
+      }
       if (!await client.isUserAuthorized()) {
         throw new Error('La sesión no está autorizada. Ejecuta de nuevo "npm run setup:telegram-hell".');
       }
