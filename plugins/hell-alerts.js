@@ -8,6 +8,7 @@ import { connectionManager } from '../lib/funcion/connection-manager.js';
 import { getGroupDataForPlugin } from '../lib/funcion/pluginHelper.js';
 import { getTelegramMediaInfo } from '../lib/funcion/telegram-media.js';
 import { traducirAlEspanol } from '../lib/funcion/traducir-espanol.js';
+import { composeHellImage } from '../lib/funcion/hell-image.js';
 
 const CONFIG_PATH = path.resolve('database', 'hell-alerts-telegram.json');
 const CHANNEL_USERNAME = 'LMEvents';
@@ -220,28 +221,6 @@ export async function cropEventImageWatermark(photo) {
   return sharp(photo).extract({ left: 0, top: 0, width, height: croppedHeight }).toBuffer();
 }
 
-async function addHellBackground(photo) {
-  const { width, height } = await sharp(photo).metadata();
-  if (!width || !height) return photo;
-  const padding = Math.max(18, Math.round(width * 0.035));
-  const header = Math.max(55, Math.round(width * 0.11));
-  const footer = Math.max(18, Math.round(width * 0.035));
-  const canvasWidth = width + padding * 2;
-  const canvasHeight = height + header + footer;
-  const title = `<svg width="${canvasWidth}" height="${header}" xmlns="http://www.w3.org/2000/svg"><text x="50%" y="65%" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.round(header * 0.44)}" font-weight="bold" fill="#fff1df">INFIERNO ACTIVO</text></svg>`;
-  return sharp({
-    create: {
-      width: canvasWidth,
-      height: canvasHeight,
-      channels: 3,
-      background: '#38131b'
-    }
-  }).composite([
-    { input: Buffer.from(title), left: 0, top: 0 },
-    { input: photo, left: padding, top: header }
-  ]).jpeg({ quality: 88 }).toBuffer();
-}
-
 async function downloadEventPhoto(client, message) {
   if (!message.media?.photo) return null;
   const photo = await client.downloadMedia(message, {});
@@ -249,13 +228,14 @@ async function downloadEventPhoto(client, message) {
     throw new Error(`No se pudo descargar la imagen de la publicación ${message.id}.`);
   }
   if (photo.length > 8 * 1024 * 1024) throw new Error('La imagen del evento excede el límite de 8 MB.');
+  if (getEventType(message.message || '') === 'hell') {
+    return composeHellImage(photo);
+  }
   const croppedPhoto = await cropEventImageWatermark(photo);
   if (croppedPhoto !== photo) {
     console.log(`[hell-alerts] Se recortó la marca de agua inferior de la publicación ${message.id}.`);
   }
-  return getEventType(message.message || '') === 'hell'
-    ? addHellBackground(croppedPhoto)
-    : croppedPhoto;
+  return croppedPhoto;
 }
 
 function getOnaxButtons(message) {
