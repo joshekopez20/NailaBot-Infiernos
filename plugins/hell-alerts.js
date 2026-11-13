@@ -8,7 +8,6 @@ import { connectionManager } from '../lib/funcion/connection-manager.js';
 import { getGroupDataForPlugin } from '../lib/funcion/pluginHelper.js';
 import { getTelegramMediaInfo } from '../lib/funcion/telegram-media.js';
 import { traducirAlEspanol } from '../lib/funcion/traducir-espanol.js';
-import { composeHellImage } from '../lib/funcion/hell-image.js';
 
 const CONFIG_PATH = path.resolve('database', 'hell-alerts-telegram.json');
 const CHANNEL_USERNAME = 'LMEvents';
@@ -202,11 +201,11 @@ export function isSupportedEvent(message) {
   return Boolean(getEventType(message?.message || ''));
 }
 
-export function formatEventMessage(message) {
+export function formatEventMessage(message, translatedTargets) {
   const text = message.message || '';
   const type = getEventType(text);
   const event = EVENT_TYPES[type] || EVENT_TYPES.hell;
-  const targets = getEventTags(text);
+  const targets = translatedTargets || getEventTags(text);
   return [
     `╭── ${event.icon} *${event.label}* ${event.accent} ──╮`,
     targets.length ? `🎯 *Objetivos:* ${targets.join(' · ')}` : '📸 *Objetivo:* revisa la imagen del evento.',
@@ -224,6 +223,19 @@ export async function cropEventImageWatermark(photo) {
   return sharp(photo).extract({ left: 0, top: 0, width, height: croppedHeight }).toBuffer();
 }
 
+async function addHellBackground(photo) {
+  const { width, height } = await sharp(photo).metadata();
+  if (!width || !height) return photo;
+  const padding = Math.max(18, Math.round(width * 0.035));
+  const header = Math.max(55, Math.round(width * 0.11));
+  const footer = Math.max(18, Math.round(width * 0.035));
+  const canvasWidth = width + padding * 2;
+  const title = `<svg width="${canvasWidth}" height="${header}" xmlns="http://www.w3.org/2000/svg"><text x="50%" y="65%" text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.round(header * 0.44)}" font-weight="bold" fill="#fff1df">INFIERNO ACTIVO</text></svg>`;
+  return sharp({ create: { width: canvasWidth, height: height + header + footer, channels: 3, background: '#38131b' } })
+    .composite([{ input: Buffer.from(title), left: 0, top: 0 }, { input: photo, left: padding, top: header }])
+    .jpeg({ quality: 88 }).toBuffer();
+}
+
 async function downloadEventPhoto(client, message) {
   if (!message.media?.photo) return null;
   const photo = await client.downloadMedia(message, {});
@@ -231,14 +243,13 @@ async function downloadEventPhoto(client, message) {
     throw new Error(`No se pudo descargar la imagen de la publicación ${message.id}.`);
   }
   if (photo.length > 8 * 1024 * 1024) throw new Error('La imagen del evento excede el límite de 8 MB.');
-  if (getEventType(message.message || '') === 'hell') {
-    return composeHellImage(photo);
-  }
   const croppedPhoto = await cropEventImageWatermark(photo);
   if (croppedPhoto !== photo) {
     console.log(`[hell-alerts] Se recortó la marca de agua inferior de la publicación ${message.id}.`);
   }
-  return croppedPhoto;
+  return getEventType(message.message || '') === 'hell'
+    ? addHellBackground(croppedPhoto)
+    : croppedPhoto;
 }
 
 function getOnaxButtons(message) {
@@ -252,15 +263,14 @@ function getOnaxButtons(message) {
   }));
 }
 
-export function formatOnaxMessage(message, isTelegramResponse = false) {
+export function formatOnaxMessage(message, isTelegramResponse = false, translatedButtons) {
   const text = String(message.message || '');
-  if (isTelegramResponse) return text;
-
   const trimmedText = text.trim();
-  const buttons = getOnaxButtons(message);
+  const buttons = translatedButtons || getOnaxButtons(message);
   const buttonText = buttons.length
     ? `🔘 Opciones:\n${buttons.map(button => `• ${button.label}${button.url ? `: ${button.url}` : ''}`).join('\n')}`
     : '';
+  if (isTelegramResponse) return [trimmedText, buttonText].filter(Boolean).join('\n\n');
   const heading = `📨 *NOVEDADES DE ${ONAX_SOURCE_TITLE.toLocaleUpperCase('es')}*`;
   const content = [trimmedText || 'El mensaje no contiene texto.', buttonText].filter(Boolean);
   return [
@@ -286,7 +296,11 @@ async function deliverOnaxMessage(client, chatId, config, message, isTelegramRes
     ...message,
     message: await traducirAlEspanol(message.message || '')
   };
-  let text = formatOnaxMessage(translatedMessage, isTelegramResponse);
+  const translatedButtons = await Promise.all(getOnaxButtons(message).map(async button => ({
+    ...button,
+    label: await traducirAlEspanol(button.label)
+  })));
+  let text = formatOnaxMessage(translatedMessage, isTelegramResponse, translatedButtons);
   const mediaInfo = getOnaxMedia(message);
   let media = null;
   if (mediaInfo) {
@@ -376,18 +390,19 @@ async function processOnaxMessage(client, message) {
 
   const messageId = Number(message.id);
   const request = onaxState.activeOnaxRequest;
+  const replyToId = Number(message.replyTo?.replyToMsgId);
+  const senderId = String(message.senderId || '');
   const isCommandResponse = Boolean(
     request &&
     Date.now() <= request.expiresAt &&
     Number(message.date || 0) * 1000 >= request.startedAt - 1000 &&
-    (
-      request.commandMessageId == null ||
-      !message.replyTo?.replyToMsgId ||
-      Number(message.replyTo.replyToMsgId) === request.commandMessageId
-    ) &&
-    onaxState.responseBotIds?.has(String(message.senderId || ''))
+    (!replyToId || replyToId === request.commandMessageId) &&
+    (replyToId === request.commandMessageId ||
+      (request.responseSenderId && senderId === request.responseSenderId) ||
+      (onaxState.responseBotIds?.size === 1 && onaxState.responseBotIds.has(senderId)))
   );
   if (isCommandResponse) {
+    request.responseSenderId = senderId;
     // Advance every cursor so catch-up cannot broadcast this private response later.
     for (const [, config] of getTargetChats('onax')) {
       config.lastOnaxMessageId = Math.max(Number(config.lastOnaxMessageId) || 0, messageId);
@@ -457,6 +472,7 @@ async function forwardWhatsAppCommandToTelegram(m, conn) {
 
   const commandText = String(m.text || '').trim();
   if (!/^\/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?(?:\s|$)/.test(commandText)) return;
+  if (m.message?.imageMessage && /^\/f(?:\s|$)/i.test(commandText)) return;
   if (commandText.length > ONAX_COMMAND_MAX_LENGTH) {
     return m.reply(`❌ El comando supera el límite de ${ONAX_COMMAND_MAX_LENGTH} caracteres.`);
   }
@@ -465,8 +481,7 @@ async function forwardWhatsAppCommandToTelegram(m, conn) {
   if (
     state.status !== 'connected' ||
     !state.client ||
-    !state.forwardChat ||
-    !state.responseBotIds?.size
+    !state.forwardChat
   ) {
     return m.reply(`❌ El puente con el bot de "${ONAX_SOURCE_TITLE}" no está disponible.`);
   }
@@ -491,6 +506,7 @@ async function forwardWhatsAppCommandToTelegram(m, conn) {
     startedAt: Date.now(),
     expiresAt: Date.now() + ONAX_REPLY_TIMEOUT_MS,
     responseCount: 0,
+    responseSenderId: null,
     timeout: null,
     idleTimeout: null
   };
@@ -513,7 +529,9 @@ async function deliverToChat(client, chatId, config, message) {
   const bot = getConnectionForBot(config.botJid);
   if (!bot?.user?.jid) throw new Error(`La sesión WhatsApp ${config.botJid} no está conectada.`);
 
-  const caption = formatEventMessage(message, config);
+  const tags = getEventTags(message.message || '');
+  const translatedTargets = await Promise.all(tags.map(tag => traducirAlEspanol(tag.replaceAll('_', ' '))));
+  const caption = formatEventMessage(message, translatedTargets);
   const photo = await downloadEventPhoto(client, message);
   console.warn('[hell-alerts] Esta sesión no soporta botones interactivos; enviaré el aviso con enlace de respaldo.');
   if (photo) {
@@ -933,7 +951,7 @@ async function startTelegramListener() {
         if (responseBots.size !== 1) {
           console.warn(
             `[onax] Se encontraron ${responseBots.size} bots que respondieron recientemente en ${ONAX_SOURCE_TITLE}; ` +
-            'el puente de comandos requiere un único bot de respuesta identificable.'
+            'se identificarán las respuestas por el mensaje al que contestan.'
           );
         }
         client.addEventHandler(
@@ -1103,10 +1121,6 @@ const handler = async (m, { conn, command, args }) => {
       if (state.status !== 'connected' || !state.client || !state.forwardChat) {
         return m.reply(`❌ Telegram no está conectado al grupo "${ONAX_SOURCE_TITLE}".`);
       }
-      if (state.responseBotIds?.size !== 1) {
-        return m.reply('❌ No pude identificar un único bot de respuesta en Telegram; no activé el puente de comandos.');
-      }
-
       const botJid = normalizeJid(conn);
       if (!botJid) return m.reply('❌ No pude identificar la sesión de WhatsApp que debe reenviar los mensajes.');
 
@@ -1297,7 +1311,7 @@ const handler = async (m, { conn, command, args }) => {
       `Listener Telegram: ${state.status}`,
       `Avisos ${INFO_SOURCE_TITLE}: ${state.infoSource ? (chatConfig.enabled && chatConfig.infoTelegramEnabled ? '✅ Conectados' : '⏸️ Conectado, desactivado') : '❌ No conectado'}`,
       `Reenvío ${ONAX_SOURCE_TITLE}: ${chatConfig.onaxEnabled ? '✅ Activado' : '❌ Desactivado'}`,
-      `Puente de comandos: ${chatConfig.onaxEnabled && getListenerState().responseBotIds?.size === 1 ? '✅ Disponible' : '❌ No disponible'}`,
+      `Puente de comandos: ${chatConfig.onaxEnabled && state.status === 'connected' && state.forwardChat ? '✅ Disponible' : '❌ No disponible'}`,
       `Fuentes de este grupo: ${[
         chatConfig.enabled && chatConfig.telegramEnabled !== false && '@LMEvents',
         chatConfig.enabled && chatConfig.infoTelegramEnabled && INFO_SOURCE_TITLE,
