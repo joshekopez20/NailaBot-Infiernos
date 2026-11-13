@@ -11,6 +11,7 @@ import fsSync from 'fs';
 import v8 from 'v8';
 import { ensureConfigSkipWorktree } from './lib/funcion/self-update.js';
 import { ensureCriticalFiles, respaldarConfigLocal, instalarGuardiaConfig } from './lib/funcion/git-repair.js';
+import { isDatabaseLockOwnerActive } from './lib/funcion/databaseLock.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 process.chdir(__dirname);
@@ -299,10 +300,8 @@ function databaseOwnedByAnotherProcess(workerPid) {
   if (lock.pid === workerPid) return false;
 
   try {
-    process.kill(lock.pid, 0);
-    return true;
+    return isDatabaseLockOwnerActive(lock.pid);
   } catch (error) {
-    if (error.code === 'ESRCH') return false;
     console.error(`[database lock] No se pudo verificar el PID ${lock.pid}: ${error.message}`);
     return true;
   }
