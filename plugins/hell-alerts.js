@@ -128,11 +128,14 @@ function getListenerState() {
   return global.__hellAlertsTelegram;
 }
 
-async function waitForTelegramField(field) {
+async function waitForTelegramField(field, previousValue = '') {
   console.log(`[hell-alerts] Esperando ${field} en config.js; guarda el archivo desde el editor del hosting.`);
   while (true) {
     const value = String(global.telegramConfig?.[field] || '').trim();
-    if (value) return value;
+    if (value && value !== previousValue) {
+      console.log(`[hell-alerts] Nuevo valor de ${field} detectado.`);
+      return value;
+    }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 }
@@ -824,11 +827,24 @@ async function startTelegramListener() {
       );
       state.client = client;
       if (!savedSession) {
+        let previousCode = String(global.telegramConfig?.code || '').trim();
         await client.start({
           phoneNumber: async () => inlineConfig.phone,
-          phoneCode: async () => waitForTelegramField('code'),
+          phoneCode: async () => {
+            const code = await waitForTelegramField('code', previousCode);
+            previousCode = code;
+            return code;
+          },
           password: async () => waitForTelegramField('password'),
-          onError: error => console.error(`[hell-alerts] Telegram: ${error.message}`)
+          onError: error => {
+            const message = String(error?.message || error);
+            if (/Please wait \d+ seconds|FLOOD_WAIT/i.test(message)) {
+              console.error(`[hell-alerts] Telegram limitó los intentos: ${message}. Espera el tiempo indicado antes de reiniciar; borra el código anterior de config.js.`);
+              return true;
+            }
+            console.error(`[hell-alerts] Telegram rechazó el intento: ${message}. Esperando un código nuevo.`);
+            return false;
+          }
         });
         fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
         fs.writeFileSync(CONFIG_PATH, JSON.stringify({
